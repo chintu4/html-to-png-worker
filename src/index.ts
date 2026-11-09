@@ -1,147 +1,92 @@
-import puppeteer from "@cloudflare/puppeteer";
-
 export interface Env {
-  MYBROWSER: puppeteer.BrowserWorker;
+  MYBROWSER: any;
 }
-
-interface RenderOptions {
-  html: string;
-  width?: number;
-  height?: number;
-  fullPage?: boolean;
-  deviceScaleFactor?: number;
-  waitUntil?: "load" | "domcontentloaded" | "networkidle0" | "networkidle2";
-}
-
-const DEFAULT_WIDTH = 1200;
-const DEFAULT_HEIGHT = 630;
-const DEFAULT_DEVICE_SCALE = 1;
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
 
-    // Serve interactive test UI on GET /
     if (request.method === "GET") {
-      return handlePlayground(request);
+      return handlePlayground();
     }
 
     if (request.method !== "POST") {
-      return new Response(JSON.stringify({ error: "Method not allowed. Use POST or GET." }), {
+      return new Response(JSON.stringify({ error: "Method not allowed. Use POST." }), {
         status: 405,
-        headers: { "Content-Type": "application/json", Allow: "GET, POST" },
+        headers: { "Content-Type": "application/json" }
       });
     }
 
     try {
-      let options: RenderOptions;
+      let html = "";
+      let width = 1200;
+      let height = 630;
+      let fullPage = false;
+      let deviceScaleFactor = 1;
+
       const contentType = request.headers.get("content-type") || "";
 
       if (contentType.includes("application/json")) {
-        const body = (await request.json()) as Partial<RenderOptions>;
-        if (!body.html || typeof body.html !== "string") {
-          return new Response(
-            JSON.stringify({ error: "Missing required 'html' string field in JSON payload." }),
-            { status: 400, headers: { "Content-Type": "application/json" } }
-          );
-        }
-        options = {
-          html: body.html,
-          width: typeof body.width === "number" ? body.width : DEFAULT_WIDTH,
-          height: typeof body.height === "number" ? body.height : DEFAULT_HEIGHT,
-          fullPage: Boolean(body.fullPage),
-          deviceScaleFactor: typeof body.deviceScaleFactor === "number" ? body.deviceScaleFactor : DEFAULT_DEVICE_SCALE,
-          waitUntil: body.waitUntil || "networkidle0",
-        };
+        const body = (await request.json()) as any;
+        html = body.html || "";
+        if (typeof body.width === "number") width = body.width;
+        if (typeof body.height === "number") height = body.height;
+        if (typeof body.fullPage === "boolean") fullPage = body.fullPage;
+        if (typeof body.deviceScaleFactor === "number") deviceScaleFactor = body.deviceScaleFactor;
       } else {
-        // Assume text/html or raw text
-        const html = await request.text();
-        if (!html.trim()) {
-          return new Response(
-            JSON.stringify({ error: "Empty request body. Please provide HTML content." }),
-            { status: 400, headers: { "Content-Type": "application/json" } }
-          );
-        }
-
-        const widthParam = url.searchParams.get("width");
-        const heightParam = url.searchParams.get("height");
-        const fullPageParam = url.searchParams.get("fullPage");
-        const scaleParam = url.searchParams.get("scale") || url.searchParams.get("deviceScaleFactor");
-        const waitUntilParam = url.searchParams.get("waitUntil") as RenderOptions["waitUntil"];
-
-        options = {
-          html,
-          width: widthParam ? parseInt(widthParam, 10) || DEFAULT_WIDTH : DEFAULT_WIDTH,
-          height: heightParam ? parseInt(heightParam, 10) || DEFAULT_HEIGHT : DEFAULT_HEIGHT,
-          fullPage: fullPageParam === "true" || fullPageParam === "1",
-          deviceScaleFactor: scaleParam ? parseFloat(scaleParam) || DEFAULT_DEVICE_SCALE : DEFAULT_DEVICE_SCALE,
-          waitUntil: waitUntilParam || "networkidle0",
-        };
+        html = await request.text();
+        const w = url.searchParams.get("width");
+        const h = url.searchParams.get("height");
+        const fp = url.searchParams.get("fullPage");
+        const scale = url.searchParams.get("scale") || url.searchParams.get("deviceScaleFactor");
+        if (w) width = parseInt(w, 10) || width;
+        if (h) height = parseInt(h, 10) || height;
+        if (fp) fullPage = fp === "true" || fp === "1";
+        if (scale) deviceScaleFactor = parseFloat(scale) || deviceScaleFactor;
       }
 
-      // Check if browser binding exists
+      if (!html || !html.trim()) {
+        return new Response(JSON.stringify({ error: "Missing required HTML code." }), {
+          status: 400,
+          headers: { "Content-Type": "application/json" }
+        });
+      }
+
       if (!env.MYBROWSER) {
-        return new Response(
-          JSON.stringify({
-            error: "Browser binding 'MYBROWSER' not configured.",
-            hint: "Ensure Cloudflare Browser Rendering is enabled on your Cloudflare account and configured in wrangler.jsonc",
-          }),
-          { status: 500, headers: { "Content-Type": "application/json" } }
-        );
+        return new Response(JSON.stringify({ error: "Browser binding 'MYBROWSER' not configured." }), {
+          status: 500,
+          headers: { "Content-Type": "application/json" }
+        });
       }
 
-      const imgBuffer = await renderHtmlToPng(env.MYBROWSER, options);
-
-      return new Response(imgBuffer, {
-        headers: {
-          "Content-Type": "image/png",
-          "Cache-Control": "public, max-age=86400, s-maxage=86400",
+      // Cloudflare Browser Rendering Quick Action
+      const screenshotResponse = await env.MYBROWSER.quickAction("screenshot", {
+        html,
+        viewport: {
+          width,
+          height,
+          deviceScaleFactor
         },
+        screenshotOptions: {
+          fullPage,
+          type: "png"
+        }
       });
-    } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : String(err);
-      return new Response(
-        JSON.stringify({
-          error: "Failed to render image from HTML",
-          details: message,
-        }),
-        { status: 500, headers: { "Content-Type": "application/json" } }
-      );
+
+      return screenshotResponse;
+    } catch (err: any) {
+      return new Response(JSON.stringify({
+        error: "Failed to render image",
+        details: err.message || String(err)
+      }), {
+        status: 500,
+        headers: { "Content-Type": "application/json" }
+      });
     }
-  },
+  }
 };
 
-async function renderHtmlToPng(
-  browserWorker: puppeteer.BrowserWorker,
-  options: RenderOptions
-): Promise<Uint8Array> {
-  const browser = await puppeteer.launch(browserWorker);
-
-  try {
-    const page = await browser.newPage();
-
-    await page.setViewport({
-      width: options.width ?? DEFAULT_WIDTH,
-      height: options.height ?? DEFAULT_HEIGHT,
-      deviceScaleFactor: options.deviceScaleFactor ?? DEFAULT_DEVICE_SCALE,
-    });
-
-    await page.setContent(options.html, {
-      waitUntil: options.waitUntil ?? "networkidle0",
-    });
-
-    const screenshot = await page.screenshot({
-      type: "png",
-      fullPage: options.fullPage ?? false,
-    });
-
-    return screenshot as Uint8Array;
-  } finally {
-    await browser.close();
-  }
-}
-
-function handlePlayground(_request: Request): Response {
+function handlePlayground(): Response {
   const html = `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -152,7 +97,7 @@ function handlePlayground(_request: Request): Response {
     :root {
       --bg: #0f172a;
       --card-bg: #1e293b;
-      --accent: #f97316;
+      --accent: #0284c7;
       --text: #f8fafc;
       --muted: #94a3b8;
       --border: #334155;
@@ -176,11 +121,11 @@ function handlePlayground(_request: Request): Response {
     h1 { font-size: 1.25rem; font-weight: 600; display: flex; align-items: center; gap: 0.5rem; }
     .badge {
       font-size: 0.75rem;
-      background: rgba(249, 115, 22, 0.2);
-      color: var(--accent);
+      background: rgba(2, 132, 199, 0.2);
+      color: #38bdf8;
       padding: 0.2rem 0.6rem;
       border-radius: 9999px;
-      border: 1px solid rgba(249, 115, 22, 0.4);
+      border: 1px solid rgba(2, 132, 199, 0.4);
     }
     main {
       display: grid;
@@ -273,9 +218,9 @@ function handlePlayground(_request: Request): Response {
   <main>
     <div class="panel">
       <h2>Input HTML</h2>
-      <textarea id="htmlInput" placeholder="Paste your HTML code here...">&lt;div style="background: linear-gradient(135deg, #6366f1, #a855f7); width: 100%; height: 100%; display: flex; flex-direction: column; justify-content: center; align-items: center; color: white; font-family: sans-serif; padding: 40px; box-sizing: border-box;"&gt;
-  &lt;h1 style="font-size: 48px; margin: 0 0 16px 0;"&gt;Hello from Cloudflare Workers! 🚀&lt;/h1&gt;
-  &lt;p style="font-size: 24px; opacity: 0.9;"&gt;HTML rendered dynamically to crisp PNG with Puppeteer&lt;/p&gt;
+      <textarea id="htmlInput" placeholder="Paste your HTML code here...">&lt;div style="background: linear-gradient(135deg, #0284c7, #6366f1); width: 100%; height: 100%; display: flex; flex-direction: column; justify-content: center; align-items: center; color: white; font-family: sans-serif; padding: 40px; box-sizing: border-box;"&gt;
+  &lt;h1 style="font-size: 44px; margin: 0 0 16px 0;"&gt;Hello from Cloudflare Workers! 🚀&lt;/h1&gt;
+  &lt;p style="font-size: 22px; opacity: 0.9;"&gt;HTML rendered dynamically to crisp PNG with Browser Rendering&lt;/p&gt;
 &lt;/div&gt;</textarea>
       <div class="controls">
         <div class="field">
@@ -326,7 +271,7 @@ function handlePlayground(_request: Request): Response {
       btn.disabled = true;
       btn.innerText = 'Rendering...';
       placeholder.style.display = 'block';
-      placeholder.innerText = 'Launching headless browser and taking screenshot...';
+      placeholder.innerText = 'Rendering HTML to PNG image...';
       resultImg.style.display = 'none';
 
       try {
@@ -359,6 +304,6 @@ function handlePlayground(_request: Request): Response {
 </html>`;
 
   return new Response(html, {
-    headers: { "Content-Type": "text/html; charset=utf-8" },
+    headers: { "Content-Type": "text/html; charset=utf-8" }
   });
 }
